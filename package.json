@@ -21,8 +21,8 @@
   "scripts": {
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
-    "dev": "rolldown build --config rolldown.config.ts --watch",
-    "build": "pnpm run clean && tsc --emitDeclarationOnly && rolldown build --config rolldown.config.ts"
+    "dev": "rolldown build --config rolldown.config.mjs --watch",
+    "build": "pnpm run clean && tsc --emitDeclarationOnly && rolldown build --config rolldown.config.mjs"
   },
   "keywords": [
     "amiibo",
@@ -31,7 +31,6 @@
   "author": "Entrivax (entrivax@gmail.com)",
   "license": "MIT",
   "devDependencies": {
-    "@rolldown/plugin-typescript": "^0.13.2",
     "@types/node": "^20.14.9",
     "rolldown": "^0.13.2",
     "typescript": "^5.4.5"
