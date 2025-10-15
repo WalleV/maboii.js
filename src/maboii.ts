@@ -1,6 +1,5 @@
 import { MasterKeys, MasterKey } from './MasterKeys';
 import { DerivedKeys } from './DerivedKeys';
-import crypto from 'crypto';
 import * as plainDataUtils from './PlainDataUtils';
 
 const HMAC_POS_DATA = 0x008
@@ -19,6 +18,90 @@ export function loadMasterKeys(key: number[]): MasterKeys|null {
         }
     
     return new MasterKeys(dataKey, tagKey);
+}
+
+
+let cachedSubtleCrypto: SubtleCrypto | null = null;
+
+function getSubtleCrypto(): SubtleCrypto {
+    if (cachedSubtleCrypto) {
+        return cachedSubtleCrypto;
+    }
+
+    const fromGlobalScope = getGlobalScopeSubtle();
+    if (fromGlobalScope) {
+        cachedSubtleCrypto = fromGlobalScope;
+        return fromGlobalScope;
+    }
+
+    const fromNode = getNodeSubtle();
+    if (fromNode) {
+        cachedSubtleCrypto = fromNode;
+        return fromNode;
+    }
+
+    throw new Error('Web Crypto API is not available in this environment.');
+}
+
+function getGlobalScopeSubtle(): SubtleCrypto | null {
+    const scope: any = typeof globalThis !== 'undefined' ? globalThis
+        : typeof self !== 'undefined' ? self
+        : typeof window !== 'undefined' ? window
+        : undefined;
+
+    const availableCrypto: Crypto | undefined = scope && scope.crypto ? scope.crypto : undefined;
+
+    if (availableCrypto && availableCrypto.subtle) {
+        return availableCrypto.subtle;
+    }
+
+    return null;
+}
+
+function getNodeSubtle(): SubtleCrypto | null {
+    if (!isNodeEnvironment()) {
+        return null;
+    }
+
+    const requireFn = getNodeRequire();
+    if (!requireFn) {
+        return null;
+    }
+
+    const nodeCrypto = tryRequire(requireFn, 'node:crypto') ?? tryRequire(requireFn, 'crypto');
+    const subtle = nodeCrypto && nodeCrypto.webcrypto && nodeCrypto.webcrypto.subtle
+        ? nodeCrypto.webcrypto.subtle
+        : null;
+
+    return subtle;
+}
+
+type NodeRequireFn = (id: string) => any;
+
+function getNodeRequire(): NodeRequireFn | null {
+    try {
+        const requireFn = (Function('return typeof require === "function" ? require : null;')() as NodeRequireFn | null);
+        return requireFn;
+    }
+    catch (error) {
+        return null;
+    }
+}
+
+function tryRequire(requireFn: NodeRequireFn, id: string): any | null {
+    try {
+        return requireFn(id);
+    }
+    catch (error) {
+        return null;
+    }
+}
+
+function isNodeEnvironment(): boolean {
+    const scope = typeof globalThis !== 'undefined' ? (globalThis as any) : undefined;
+    const processCandidate = scope && typeof scope.process === 'object' ? scope.process : undefined;
+
+    return !!(processCandidate && processCandidate.versions && typeof processCandidate.versions.node === 'string');
 }
 
 
@@ -70,7 +153,7 @@ class ArrayReader {
     }
 }
 
-export function unpack(amiiboKeys: MasterKeys, tag: number[]) {
+export async function unpack(amiiboKeys: MasterKeys, tag: number[]): Promise<{ unpacked: number[]; result: boolean }> {
     let unpacked = new Array(NFC3D_AMIIBO_SIZE).fill(0);
     let result = false;
     let internal = new Array(NFC3D_AMIIBO_SIZE).fill(0);
@@ -81,17 +164,17 @@ export function unpack(amiiboKeys: MasterKeys, tag: number[]) {
     tagToInternal(tag, internal);
 
     // Generate keys
-    amiiboKeygen(amiiboKeys.data, internal, dataKeys);
-    amiiboKeygen(amiiboKeys.tag, internal, tagKeys);
+    await amiiboKeygen(amiiboKeys.data, internal, dataKeys);
+    await amiiboKeygen(amiiboKeys.tag, internal, tagKeys);
 
     // Decrypt
-    amiiboCipher(dataKeys, internal, unpacked);
+    await amiiboCipher('decrypt', dataKeys, internal, unpacked);
 
     // Regenerate tag HMAC. Note: order matters, data HMAC depends on tag HMAC!
-    computeHmac(tagKeys.hmacKey, unpacked, 0x1D4, 0x34, unpacked, HMAC_POS_TAG);
+    await computeHmac(tagKeys.hmacKey, unpacked, 0x1D4, 0x34, unpacked, HMAC_POS_TAG);
 
     // Regenerate data HMAC
-    computeHmac(dataKeys.hmacKey, unpacked, 0x029, 0x1DF, unpacked, HMAC_POS_DATA);
+    await computeHmac(dataKeys.hmacKey, unpacked, 0x029, 0x1DF, unpacked, HMAC_POS_DATA);
 
     memcpy(unpacked, 0x208, tag, 0x208, 0x14);
 
@@ -104,28 +187,28 @@ export function unpack(amiiboKeys: MasterKeys, tag: number[]) {
     }
 }
 
-export function pack(amiiboKeys: MasterKeys, plain: number[]): number[] {
+export async function pack(amiiboKeys: MasterKeys, plain: number[]): Promise<number[]> {
     let packed = new Array(NFC3D_AMIIBO_SIZE).fill(0);
     let cipher = new Array(NFC3D_AMIIBO_SIZE).fill(0);
     let dataKeys = new DerivedKeys();
     let tagKeys = new DerivedKeys();
 
     // Generate keys
-    amiiboKeygen(amiiboKeys.tag, plain, tagKeys);
-    amiiboKeygen(amiiboKeys.data, plain, dataKeys);
+    await amiiboKeygen(amiiboKeys.tag, plain, tagKeys);
+    await amiiboKeygen(amiiboKeys.data, plain, dataKeys);
 
     // Generated tag HMAC
-    computeHmac(tagKeys.hmacKey, plain, 0x1D4, 0x34, cipher, HMAC_POS_TAG);
+    await computeHmac(tagKeys.hmacKey, plain, 0x1D4, 0x34, cipher, HMAC_POS_TAG);
 
     // Generate data HMAC
     let hmacBuffer = ([] as number[]).concat(
         plain.slice(0x029, 0x029 + 0x18B),
         cipher.slice(HMAC_POS_TAG, HMAC_POS_TAG + 0x20),
         plain.slice(0x1D4, 0x1D4 + 0x34));
-    computeHmac(dataKeys.hmacKey, hmacBuffer, 0, hmacBuffer.length, cipher, HMAC_POS_DATA);
+    await computeHmac(dataKeys.hmacKey, hmacBuffer, 0, hmacBuffer.length, cipher, HMAC_POS_DATA);
 
     // Encrypt
-    amiiboCipher(dataKeys, plain, cipher);
+    await amiiboCipher('encrypt', dataKeys, plain, cipher);
 
     // Convert back to hardware
     internalToTag(cipher, packed);
@@ -144,22 +227,25 @@ function memcmp(s1: any[], s1Offset: number, s2: any[], s2Offset: number, size: 
     return 0;
 }
 
-function memcpy(destination: any[]|DerivedKeys, destinationOffset: number, source: any[], sourceOffset: number, length: number) {
-    let setDestinationByte: (destination: any[] & DerivedKeys, i: number, value: any) => void = Array.isArray(destination) ?
-        (destination: any[], i: number, value: any): void => {
-            destination[i] = value;
-        } : (destination: DerivedKeys, i: number, value: any): void => {
-            destination.setByte(i, value);
-        };
-    let getSourceByte: (destination: any[] & DerivedKeys, i: number) => any = Array.isArray(source) ?
-        (source: any[], i: number): any => {
-            return source[i];
-        } : (source: DerivedKeys, i: number): number => {
-            return source.getByte(i);
-        };
+function memcpy(destination: number[]|DerivedKeys|Uint8Array, destinationOffset: number, source: number[]|DerivedKeys|Uint8Array, sourceOffset: number, length: number) {
+    const setDestinationByte = (dest: number[]|DerivedKeys|Uint8Array, index: number, value: number) => {
+        if (dest instanceof DerivedKeys) {
+            dest.setByte(index, value);
+        }
+        else {
+            (dest as any)[index] = value;
+        }
+    };
+
+    const getSourceByte = (src: number[]|DerivedKeys|Uint8Array, index: number) => {
+        if (src instanceof DerivedKeys) {
+            return src.getByte(index);
+        }
+        return (src as any)[index];
+    };
 
     for (let i = 0; i < length; i++) {
-        setDestinationByte(<any>destination, destinationOffset + i, getSourceByte(<any>source, sourceOffset + i));
+        setDestinationByte(destination, destinationOffset + i, getSourceByte(source, sourceOffset + i));
     }
 }
 
@@ -179,11 +265,11 @@ function memset(destination: any[], destinationOffset: number, data: any, length
     }
 }
 
-function amiiboKeygen(masterKey: MasterKey, internalDump: number[], derivedKeys: DerivedKeys) {
+async function amiiboKeygen(masterKey: MasterKey, internalDump: number[], derivedKeys: DerivedKeys) {
     let seed: number[] = [];
 
     amiiboCalcSeed(internalDump, seed);
-    keygen(masterKey, seed, derivedKeys);
+    await keygen(masterKey, seed, derivedKeys);
 }
 
 function amiiboCalcSeed(internaldump: number[], seed: number[]) {
@@ -214,10 +300,10 @@ function internalToTag(internal: number[], tag: number[]) {
 	memcpy(tag, 0x054, internal, 0x1DC, 0x02C);
 }
 
-function keygen(baseKey: MasterKey, baseSeed: number[], derivedKeys: DerivedKeys) {
+async function keygen(baseKey: MasterKey, baseSeed: number[], derivedKeys: DerivedKeys) {
     let preparedSeed: number[] = [];
     keygenPrepareSeed(baseKey, baseSeed, preparedSeed);
-    drbgGenerateBytes(baseKey.hmacKey, preparedSeed, derivedKeys);
+    await drbgGenerateBytes(baseKey.hmacKey, preparedSeed, derivedKeys);
 }
 
 function keygenPrepareSeed(baseKey: MasterKey, baseSeed: number[], output: number[]) {
@@ -246,51 +332,67 @@ function keygenPrepareSeed(baseKey: MasterKey, baseSeed: number[], output: numbe
     return outputOffset;
 }
 
-function drbgGenerateBytes(hmacKey: number[], seed: number[], output: DerivedKeys) {
+async function drbgGenerateBytes(hmacKey: number[], seed: number[], output: DerivedKeys) {
     const DRBG_OUTPUT_SIZE = 32;
     let outputSize = 48;
     let outputOffset = 0;
-    let temp: number[] = [];
 
-    let iterationCtx = { iteration: 0 };
+    const subtle = getSubtleCrypto();
+    const hmacImportParams: HmacImportParams = { name: 'HMAC', hash: 'SHA-256' };
+    const cryptoKey = await subtle.importKey('raw', new Uint8Array(hmacKey), hmacImportParams, false, ['sign']);
+
+    let iteration = 0;
     while (outputSize > 0) {
+        const block = await drbgStep(subtle, cryptoKey, iteration, seed);
+        iteration++;
+
         if (outputSize < DRBG_OUTPUT_SIZE) {
-            drbgStep(initHmac(hmacKey, iterationCtx.iteration, seed), temp, 0, iterationCtx);
-            memcpy(output, outputOffset, temp, 0, outputSize);
+            memcpy(output, outputOffset, block, 0, outputSize);
             break;
         }
 
-        drbgStep(initHmac(hmacKey, iterationCtx.iteration, seed), output, outputOffset, iterationCtx);
+        memcpy(output, outputOffset, block, 0, DRBG_OUTPUT_SIZE);
         outputOffset += DRBG_OUTPUT_SIZE;
         outputSize -= DRBG_OUTPUT_SIZE;
     }
 }
 
-function initHmac(hmacKey: number[], iteration: number, seed: number[]): crypto.Hmac {
-    let hmac = crypto.createHmac('sha256', new Uint8Array(hmacKey));
-    hmac.update(new Uint8Array([(iteration >> 8) & 0x0f, (iteration >> 0) & 0x0f].concat(seed)));
-    return hmac;
+async function drbgStep(subtle: SubtleCrypto, key: CryptoKey, iteration: number, seed: number[]): Promise<number[]> {
+    const iterationBytes = new Uint8Array([(iteration >> 8) & 0x0f, (iteration >> 0) & 0x0f]);
+    const data = new Uint8Array(iterationBytes.length + seed.length);
+    data.set(iterationBytes, 0);
+    data.set(seed, iterationBytes.length);
+
+    const digest = await subtle.sign('HMAC', key, data);
+    return Array.from(new Uint8Array(digest));
 }
 
-function drbgStep(hmac: crypto.Hmac, output: DerivedKeys|number[], outputOffset: number, iterationCtx: { iteration: number }) {
-    iterationCtx.iteration++;
-    let buf = hmac.digest('latin1');
-    memcpy(output, outputOffset, Array.from(buf).map((a) => '' + a.charCodeAt(0)), 0, buf.length);
-}
+async function amiiboCipher(mode: 'encrypt' | 'decrypt', keys: DerivedKeys, input: number[], output: number[]) {
+    const subtle = getSubtleCrypto();
+    const cryptoKey = await subtle.importKey('raw', new Uint8Array(keys.aesKey), { name: 'AES-CTR', length: 128 } as any, false, ['encrypt', 'decrypt']);
+    const data = new Uint8Array(input).subarray(0x02C, 0x02C + 0x188);
+    const algorithm = { name: 'AES-CTR', counter: new Uint8Array(keys.aesIV), length: 128 };
+    const processedBuffer = mode === 'encrypt'
+        ? await subtle.encrypt(algorithm, cryptoKey, data)
+        : await subtle.decrypt(algorithm, cryptoKey, data);
+    const processed = Array.from(new Uint8Array(processedBuffer));
 
-function amiiboCipher(keys: DerivedKeys, input: number[], output: number[]) {
-    let cipher = crypto.createCipheriv('aes-128-ctr', new Uint8Array(keys.aesKey), new Uint8Array(keys.aesIV));
-    let buf = Array.from(cipher.update(new Uint8Array(input).subarray(0x02C, 0x02C + 0x188)));
-
-    memcpy(output, 0x02C, buf, 0, 0x188);
+    memcpy(output, 0x02C, processed, 0, 0x188);
 
     memcpy(output, 0, input, 0, 0x008);
     memcpy(output, 0x028, input, 0x028, 0x004);
     memcpy(output, 0x1D4, input, 0x1D4, 0x034);
 }
 
-function computeHmac(hmacKey: number[], input: number[], inputOffset: number, inputLength: number, output: number[], outputOffset: number) {
-    let hmac = crypto.createHmac('sha256', new Uint8Array(hmacKey));
-    let result = Array.from(hmac.update(new Uint8Array(input).subarray(inputOffset, inputOffset + inputLength)).digest());
+async function computeHmac(hmacKey: number[], input: number[]|Uint8Array, inputOffset: number, inputLength: number, output: number[], outputOffset: number) {
+    const subtle = getSubtleCrypto();
+    const hmacImportParams: HmacImportParams = { name: 'HMAC', hash: 'SHA-256' };
+    const cryptoKey = await subtle.importKey('raw', new Uint8Array(hmacKey), hmacImportParams, false, ['sign']);
+    const slice = Array.isArray(input)
+        ? input.slice(inputOffset, inputOffset + inputLength)
+        : Array.from((input as Uint8Array).slice(inputOffset, inputOffset + inputLength));
+    const data = new Uint8Array(slice);
+    const digest = await subtle.sign('HMAC', cryptoKey, data);
+    const result = Array.from(new Uint8Array(digest));
     memcpy(output, outputOffset, result, 0, result.length);
 }

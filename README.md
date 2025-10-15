@@ -5,24 +5,25 @@ This library is a port of the encryption/decryption code from [socram8888/amiito
 ## How to use
 ### Install the package
 ```bash
-npm install maboii
+pnpm add maboii
 ```
 
 ### Load the keys
 ```js
-const maboii = require('maboii');
-const fs = require('fs');
+import { loadMasterKeys } from 'maboii';
 
-// Read keys from file
-let fileBuffer = fs.readFileSync('./keys.bin');
-const keys = maboii.loadMasterKeys([...fileBuffer]);
+const keyResponse = await fetch('./keys.bin');
+const keyBytes = new Uint8Array(await keyResponse.arrayBuffer());
+const keys = loadMasterKeys(Array.from(keyBytes));
 ```
 
 ### Decrypt dump
 ```js
-// Read dump from file
-let dumpFileBuffer = fs.readFileSync('./dumpFile.bin')
-let unpackResult = maboii.unpack(keys, [...dumpFileBuffer]);
+import { unpack } from 'maboii';
+
+const dumpResponse = await fetch('./dumpFile.bin');
+const dumpBuffer = new Uint8Array(await dumpResponse.arrayBuffer());
+const unpackResult = await unpack(keys, Array.from(dumpBuffer));
 
 // If decrypt is successful
 if (unpackResult.result) {
@@ -32,25 +33,52 @@ if (unpackResult.result) {
 
 ### Encrypt plain data
 ```js
-// Read plain dump from file
-let plainDumpFileBuffer = fs.readFileSync('./dumpFile.dec.bin')
-let packedResult = maboii.pack(keys, [...plainDumpFileBuffer]);
+import { pack } from 'maboii';
+
+const plainDumpResponse = await fetch('./dumpFile.dec.bin');
+const plainDumpBuffer = new Uint8Array(await plainDumpResponse.arrayBuffer());
+const packedResult = await pack(keys, Array.from(plainDumpBuffer));
+```
+
+### Use from Node.js
+```js
+import { readFile } from 'node:fs/promises';
+import { loadMasterKeys, unpack } from 'maboii';
+
+const keyBytes = await readFile(new URL('./keys.bin', import.meta.url));
+const keys = loadMasterKeys([...keyBytes]);
+
+const dumpBytes = await readFile(new URL('./dumpFile.bin', import.meta.url));
+const { unpacked } = await unpack(keys, [...dumpBytes]);
 ```
 
 ### Read information from plain data
 ```js
-const maboii = require('maboii');
-const fs = require('fs')
+import { plainDataUtils } from 'maboii';
 
-// Read plain dump from file
-let plain = [...fs.readFileSync('./dumpFile.dec.bin')]; // Let's read an Inkling dump
+// Let's read an Inkling dump
+const plainDumpResponse = await fetch('./dumpFile.dec.bin');
+const plainDumpBuffer = Array.from(new Uint8Array(await plainDumpResponse.arrayBuffer()));
 
-maboii.plainDataUtils.getAmiiboId(plain); // Returns '0800010003820002'
-maboii.plainDataUtils.getCharacterId(plain); // Returns '0800'
-maboii.plainDataUtils.getGameSeriesId(plain); // Returns '080'
-maboii.plainDataUtils.getMiiName(plain); // Returns the Mii name as string, in my case 'Holo' from my dump
-maboii.plainDataUtils.getNickName(plain); // Returns the amiibo™ name as string, in my case 'Sushy' from my dump
+plainDataUtils.getAmiiboId(plainDumpBuffer); // Returns '0800010003820002'
+plainDataUtils.getCharacterId(plainDumpBuffer); // Returns '0800'
+plainDataUtils.getGameSeriesId(plainDumpBuffer); // Returns '080'
+plainDataUtils.getMiiName(plainDumpBuffer); // Returns the Mii name as string, in my case 'Holo' from my dump
+plainDataUtils.getNickName(plainDumpBuffer); // Returns the amiibo™ name as string, in my case 'Sushy' from my dump
 ```
+
+> **Note:** The library relies on the Web Crypto API. Modern browsers expose it in secure contexts (HTTPS), while Node.js 18 and newer expose the same API through `globalThis.crypto`. Older Node.js releases can still work as long as they provide `crypto.webcrypto`.
+
+## Development
+
+The project is bundled with [Rolldown](https://rolldown.rs/) and managed with [pnpm](https://pnpm.io/).
+
+```bash
+pnpm install
+pnpm run build
+```
+
+The command above generates the browser-ready ESM bundle, the CommonJS build, and the accompanying TypeScript declaration files in `dist/`.
 
 ## Credits
 - socram8888 - Author of amiitool
